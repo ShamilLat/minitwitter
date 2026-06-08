@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minitwitter</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#000; color:#e7e9ea; }
+  .hairline { border-color:#2f3336; }
+  textarea::placeholder, input::placeholder { color:#71767b; }
+  .spin { animation: sp 1s linear infinite; } @keyframes sp { to { transform: rotate(360deg);} }
+</style>
+</head>
+<body class="min-h-screen">
+<div class="max-w-xl mx-auto border-x hairline min-h-screen">
+
+  <!-- header -->
+  <header class="sticky top-0 z-10 backdrop-blur bg-black/70 border-b hairline px-4 py-3 flex items-center justify-between">
+    <h1 class="text-xl font-bold flex items-center gap-2">🐦 <span>minitwitter</span></h1>
+    <div class="flex items-center gap-2 text-sm">
+      <span class="text-[#71767b]">ты:</span>
+      <button id="nickBtn" class="font-semibold text-[#1d9bf0] hover:underline">—</button>
+    </div>
+  </header>
+
+  <!-- composer -->
+  <section class="border-b hairline p-4 flex gap-3">
+    <div id="meAvatar" class="w-10 h-10 rounded-full bg-[#1d9bf0] flex items-center justify-center font-bold shrink-0"></div>
+    <div class="flex-1">
+      <textarea id="composer" rows="2" maxlength="280"
+        class="w-full bg-transparent text-lg outline-none resize-none"
+        placeholder="Что происходит?!"></textarea>
+      <div class="flex items-center justify-between mt-2">
+        <span id="counter" class="text-sm text-[#71767b]">280</span>
+        <button id="postBtn"
+          class="bg-[#1d9bf0] hover:bg-[#1a8cd8] disabled:opacity-50 text-white font-bold px-5 py-1.5 rounded-full">
+          Твитнуть
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- feed -->
+  <main id="feed"></main>
+  <div id="loading" class="p-8 text-center text-[#71767b]">Загрузка…</div>
+</div>
+
+<script>
+const $ = (s, el=document) => el.querySelector(s);
+let NICK = localStorage.getItem("nick") || "";
+
+function ensureNick() {
+  if (!NICK) {
+    NICK = (prompt("Придумай никнейм:", "guest" + Math.floor(Math.random()*1000)) || "anon").trim().slice(0,30) || "anon";
+    localStorage.setItem("nick", NICK);
+  }
+  $("#nickBtn").textContent = "@" + NICK;
+  $("#meAvatar").textContent = NICK.slice(0,1).toUpperCase();
+}
+$("#nickBtn").onclick = () => {
+  const n = (prompt("Сменить никнейм:", NICK) || "").trim().slice(0,30);
+  if (n) { NICK = n; localStorage.setItem("nick", n); ensureNick(); load(); }
+};
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json", "X-Nick": NICK },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status);
+  return r.status === 204 ? null : r.json();
+}
+
+function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function avatarColor(name){ let h=0; for(const c of name) h=(h*31+c.charCodeAt(0))%360; return `hsl(${h},60%,45%)`; }
+function timeAgo(iso){
+  const s = Math.floor((Date.now() - new Date(iso))/1000);
+  if (s<60) return s+"с"; if (s<3600) return Math.floor(s/60)+"м";
+  if (s<86400) return Math.floor(s/3600)+"ч"; return Math.floor(s/86400)+"д";
+}
+
+const heart = (f) => f
+  ? `<svg viewBox="0 0 24 24" class="w-5 h-5 fill-[#f91880]"><path d="M12 21s-7.5-4.6-10-9.2C.5 8.4 2 5 5.4 5c2 0 3.3 1.2 4.6 2.7C11.3 6.2 12.6 5 14.6 5 18 5 19.5 8.4 22 11.8 19.5 16.4 12 21 12 21z"/></svg>`
+  : `<svg viewBox="0 0 24 24" class="w-5 h-5 fill-none stroke-current stroke-2"><path d="M12 21s-7.5-4.6-10-9.2C.5 8.4 2 5 5.4 5c2 0 3.3 1.2 4.6 2.7C11.3 6.2 12.6 5 14.6 5 18 5 19.5 8.4 22 11.8 19.5 16.4 12 21 12 21z"/></svg>`;
+
+function postHTML(p) {
+  const mine = p.author === NICK;
+  return `
+  <article class="border-b hairline p-4 flex gap-3" data-id="${p.id}">
+    <div class="w-10 h-10 rounded-full flex items-center justify-center font-bold shrink-0"
+         style="background:${avatarColor(p.author)}">${esc(p.author.slice(0,1).toUpperCase())}</div>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-1 text-[15px]">
+        <span class="font-bold">@${esc(p.author)}</span>
+        <span class="text-[#71767b]">· ${timeAgo(p.created_at)}</span>
+        ${p.edited_at ? '<span class="text-[#71767b] text-xs">(ред.)</span>' : ''}
+        ${mine ? `<span class="ml-auto flex gap-3 text-[#71767b]">
+            <button class="hover:text-[#1d9bf0]" data-act="edit">✏️</button>
+            <button class="hover:text-[#f4212e]" data-act="del">🗑️</button>
+          </span>` : ''}
+      </div>
+      <p class="whitespace-pre-wrap break-words mt-0.5" data-role="content">${esc(p.content)}</p>
+      <div class="flex gap-10 mt-3 text-[#71767b] text-sm">
+        <button class="flex items-center gap-1 hover:text-[#1d9bf0]" data-act="toggle-comments">
+          💬 <span data-role="ccount">${p.comments}</span>
+        </button>
+        <button class="flex items-center gap-1 ${p.liked?'text-[#f91880]':'hover:text-[#f91880]'}" data-act="like">
+          ${heart(p.liked)} <span data-role="lcount">${p.likes}</span>
+        </button>
+      </div>
+      <div data-role="comments" class="hidden mt-3 border-t hairline pt-3 space-y-3"></div>
+    </div>
+  </article>`;
+}
+
+let POSTS = [];
+async function load() {
+  $("#loading").style.display = "block";
+  try {
+    POSTS = await api("GET", "/api/posts");
+    $("#feed").innerHTML = POSTS.map(postHTML).join("");
+  } catch(e){ $("#feed").innerHTML = `<div class="p-6 text-center text-[#f4212e]">Ошибка: ${esc(String(e.message))}</div>`; }
+  $("#loading").style.display = "none";
+}
+
+// composer
+$("#composer").addEventListener("input", e => {
+  $("#counter").textContent = 280 - e.target.value.length;
+});
+$("#postBtn").onclick = async () => {
+  const content = $("#composer").value.trim();
+  if (!content) return;
+  $("#postBtn").disabled = true;
+  try { await api("POST", "/api/posts", {content}); $("#composer").value=""; $("#counter").textContent=280; await load(); }
+  catch(e){ alert(e.message); }
+  $("#postBtn").disabled = false;
+};
+
+// event delegation for feed actions
+$("#feed").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const art = e.target.closest("article");
+  const id = art.dataset.id;
+  const act = btn.dataset.act;
+
+  if (act === "like") {
+    try {
+      const r = await api("POST", `/api/posts/${id}/like`);
+      $('[data-role=lcount]', art).textContent = r.likes;
+      btn.classList.toggle("text-[#f91880]", r.liked);
+      btn.querySelector("svg").outerHTML = heart(r.liked);
+    } catch(err){ alert(err.message); }
+  }
+
+  if (act === "del") {
+    if (!confirm("Удалить пост?")) return;
+    try { await api("DELETE", `/api/posts/${id}`); art.remove(); } catch(err){ alert(err.message); }
+  }
+
+  if (act === "edit") {
+    const cur = $('[data-role=content]', art).textContent;
+    const next = prompt("Редактировать пост:", cur);
+    if (next === null) return;
+    const t = next.trim();
+    if (!t) return;
+    try {
+      const p = await api("PUT", `/api/posts/${id}`, {content: t});
+      $('[data-role=content]', art).textContent = p.content;
+    } catch(err){ alert(err.message); }
+  }
+
+  if (act === "toggle-comments") {
+    const box = $('[data-role=comments]', art);
+    if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
+    box.classList.remove("hidden");
+    box.innerHTML = `<div class="text-[#71767b] text-sm">Загрузка…</div>`;
+    try {
+      const cs = await api("GET", `/api/posts/${id}/comments`);
+      box.innerHTML = renderComments(cs) + commentForm();
+    } catch(err){ box.innerHTML = `<div class="text-[#f4212e] text-sm">${esc(err.message)}</div>`; }
+  }
+
+  if (act === "send-comment") {
+    const box = $('[data-role=comments]', art);
+    const inp = $('[data-role=cinput]', box);
+    const t = inp.value.trim();
+    if (!t) return;
+    try {
+      await api("POST", `/api/posts/${id}/comments`, {content: t});
+      const cs = await api("GET", `/api/posts/${id}/comments`);
+      box.innerHTML = renderComments(cs) + commentForm();
+      $('[data-role=ccount]', art).textContent = cs.length;
+    } catch(err){ alert(err.message); }
+  }
+});
+
+function renderComments(cs){
+  if (!cs.length) return `<div class="text-[#71767b] text-sm">Пока нет комментариев</div>`;
+  return cs.map(c => `
+    <div class="flex gap-2">
+      <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+           style="background:${avatarColor(c.author)}">${esc(c.author.slice(0,1).toUpperCase())}</div>
+      <div class="text-sm"><span class="font-bold">@${esc(c.author)}</span>
+        <span class="text-[#71767b]">· ${timeAgo(c.created_at)}</span>
+        <p class="whitespace-pre-wrap break-words">${esc(c.content)}</p></div>
+    </div>`).join("");
+}
+function commentForm(){
+  return `<div class="flex gap-2 pt-1">
+    <input data-role="cinput" maxlength="280" placeholder="Ответить…"
+      class="flex-1 bg-transparent border hairline rounded-full px-3 py-1 text-sm outline-none">
+    <button data-act="send-comment" class="text-[#1d9bf0] font-semibold text-sm">Отв.</button>
+  </div>`;
+}
+
+ensureNick();
+load();
+</script>
+</body>
+</html>

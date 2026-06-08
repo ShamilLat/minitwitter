@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log"
 	"net/http"
@@ -37,6 +38,9 @@ type Comment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// errLoginTaken is returned by CreateUser when the login already exists.
+var errLoginTaken = errors.New("login taken")
+
 // Store is the storage abstraction; backed by memory locally and Postgres in prod.
 type Store interface {
 	ListPosts(ctx context.Context, viewer string) ([]Post, error)
@@ -46,6 +50,13 @@ type Store interface {
 	ToggleLike(ctx context.Context, postID int64, who string) (liked bool, likes int, err error)
 	ListComments(ctx context.Context, postID int64) ([]Comment, error)
 	AddComment(ctx context.Context, postID int64, author, content string) (Comment, error)
+
+	// Auth.
+	CreateUser(ctx context.Context, name, login, passHash string) (*User, error)
+	GetUserByLogin(ctx context.Context, login string) (*User, bool, error)
+	CreateSession(ctx context.Context, token string, userID int64) error
+	GetUserBySession(ctx context.Context, token string) (*User, error)
+	DeleteSession(ctx context.Context, token string) error
 }
 
 var store Store
@@ -68,6 +79,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/posts", handlePosts)
 	mux.HandleFunc("/api/posts/", handlePostByID)
+	mux.HandleFunc("/api/register", handleRegister)
+	mux.HandleFunc("/api/login", handleLogin)
+	mux.HandleFunc("/api/logout", handleLogout)
+	mux.HandleFunc("/api/me", handleMe)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 
 	// Serve embedded static frontend.
@@ -86,16 +101,13 @@ func envOr(k, def string) string {
 	return def
 }
 
-// who returns the acting nickname from the header, defaulting to anon.
-func who(r *http.Request) string {
-	n := strings.TrimSpace(r.Header.Get("X-Nick"))
-	if n == "" {
-		return "anon"
+// viewer returns the acting login for read ops (for the per-user "liked" flag),
+// or "" for an anonymous visitor.
+func viewer(r *http.Request) string {
+	if u := currentUser(r.Context(), r); u != nil {
+		return u.Login
 	}
-	if len(n) > 30 {
-		n = n[:30]
-	}
-	return n
+	return ""
 }
 
 func withCORS(h http.Handler) http.Handler {
@@ -122,13 +134,17 @@ func handlePosts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch r.Method {
 	case http.MethodGet:
-		posts, err := store.ListPosts(ctx, who(r))
+		posts, err := store.ListPosts(ctx, viewer(r))
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
 		writeJSON(w, 200, posts)
 	case http.MethodPost:
+		u, ok := mustUser(w, r)
+		if !ok {
+			return
+		}
 		var body struct{ Content string `json:"content"` }
 		json.NewDecoder(r.Body).Decode(&body)
 		body.Content = strings.TrimSpace(body.Content)
@@ -136,7 +152,7 @@ func handlePosts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "content must be 1..280 chars"})
 			return
 		}
-		p, err := store.CreatePost(ctx, who(r), body.Content)
+		p, err := store.CreatePost(ctx, u.Login, body.Content)
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
@@ -168,7 +184,11 @@ func handlePostByID(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(405)
 				return
 			}
-			liked, likes, err := store.ToggleLike(ctx, id, who(r))
+			u, ok := mustUser(w, r)
+			if !ok {
+				return
+			}
+			liked, likes, err := store.ToggleLike(ctx, id, u.Login)
 			if err != nil {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
@@ -185,6 +205,10 @@ func handlePostByID(w http.ResponseWriter, r *http.Request) {
 				}
 				writeJSON(w, 200, cs)
 			case http.MethodPost:
+				u, ok := mustUser(w, r)
+				if !ok {
+					return
+				}
 				var body struct{ Content string `json:"content"` }
 				json.NewDecoder(r.Body).Decode(&body)
 				body.Content = strings.TrimSpace(body.Content)
@@ -192,7 +216,7 @@ func handlePostByID(w http.ResponseWriter, r *http.Request) {
 					writeJSON(w, 400, map[string]string{"error": "content must be 1..280 chars"})
 					return
 				}
-				c, err := store.AddComment(ctx, id, who(r), body.Content)
+				c, err := store.AddComment(ctx, id, u.Login, body.Content)
 				if err != nil {
 					writeJSON(w, 500, map[string]string{"error": err.Error()})
 					return
@@ -206,9 +230,13 @@ func handlePostByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Direct post operations.
+	u, ok := mustUser(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodDelete:
-		if err := store.DeletePost(ctx, id, who(r)); err != nil {
+		if err := store.DeletePost(ctx, id, u.Login); err != nil {
 			writeJSON(w, 403, map[string]string{"error": err.Error()})
 			return
 		}
@@ -221,7 +249,7 @@ func handlePostByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "content must be 1..280 chars"})
 			return
 		}
-		p, err := store.UpdatePost(ctx, id, who(r), body.Content)
+		p, err := store.UpdatePost(ctx, id, u.Login, body.Content)
 		if err != nil {
 			writeJSON(w, 403, map[string]string{"error": err.Error()})
 			return

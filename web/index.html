@@ -18,9 +18,8 @@
   <!-- header -->
   <header class="sticky top-0 z-10 backdrop-blur bg-black/70 border-b hairline px-4 py-3 flex items-center justify-between">
     <h1 class="text-xl font-bold flex items-center gap-2">🐦 <span>minitwitter</span></h1>
-    <div class="flex items-center gap-2 text-sm">
-      <span class="text-[#71767b]">ты:</span>
-      <button id="nickBtn" class="font-semibold text-[#1d9bf0] hover:underline">—</button>
+    <div id="authBox" class="flex items-center gap-3 text-sm">
+      <!-- filled by JS: either "Войти" button, or name/@login + logout -->
     </div>
   </header>
 
@@ -36,9 +35,9 @@
     </button>
   </nav>
 
-  <!-- composer -->
-  <section class="border-b hairline p-4 flex gap-3">
-    <div id="meAvatar" class="w-10 h-10 rounded-full bg-[#1d9bf0] flex items-center justify-center font-bold shrink-0"></div>
+  <!-- composer (logged in) -->
+  <section id="composerSection" class="border-b hairline p-4 flex gap-3 hidden">
+    <div id="meAvatar" class="w-10 h-10 rounded-full flex items-center justify-center font-bold shrink-0"></div>
     <div class="flex-1">
       <textarea id="composer" rows="2" maxlength="280"
         class="w-full bg-transparent text-lg outline-none resize-none"
@@ -52,6 +51,37 @@
       </div>
     </div>
   </section>
+  <!-- sign-in prompt (logged out) -->
+  <section id="signinPrompt" class="border-b hairline p-4 text-center hidden">
+    <p class="text-[#71767b] mb-2">Войди, чтобы постить, лайкать и комментировать.</p>
+    <button onclick="openAuth('login')" class="bg-[#1d9bf0] hover:bg-[#1a8cd8] text-white font-bold px-5 py-1.5 rounded-full">Войти / Регистрация</button>
+  </section>
+
+  <!-- auth modal -->
+  <div id="authModal" class="hidden fixed inset-0 z-30 bg-black/70 flex items-center justify-center p-4">
+    <div class="bg-black border hairline rounded-2xl w-full max-w-sm p-6 relative">
+      <button onclick="closeAuth()" class="absolute top-3 right-4 text-2xl text-[#71767b] hover:text-white">×</button>
+      <h2 class="text-2xl font-bold mb-1">🐦 minitwitter</h2>
+      <div class="flex gap-4 text-sm font-semibold border-b hairline mb-4 mt-3">
+        <button id="tabLogin"   onclick="switchAuth('login')"    class="pb-2 -mb-px border-b-2 border-[#1d9bf0]">Вход</button>
+        <button id="tabRegister" onclick="switchAuth('register')" class="pb-2 -mb-px border-b-2 border-transparent text-[#71767b]">Регистрация</button>
+      </div>
+      <div id="nameField" class="hidden mb-3">
+        <input id="aName" maxlength="50" placeholder="Имя"
+          class="w-full bg-transparent border hairline rounded-lg px-3 py-2 outline-none focus:border-[#1d9bf0]">
+      </div>
+      <div class="mb-3">
+        <input id="aLogin" maxlength="30" placeholder="Логин" autocomplete="username"
+          class="w-full bg-transparent border hairline rounded-lg px-3 py-2 outline-none focus:border-[#1d9bf0]">
+      </div>
+      <div class="mb-3">
+        <input id="aPass" type="password" maxlength="72" placeholder="Пароль" autocomplete="current-password"
+          class="w-full bg-transparent border hairline rounded-lg px-3 py-2 outline-none focus:border-[#1d9bf0]">
+      </div>
+      <p id="authError" class="hidden text-[#f4212e] text-sm mb-3"></p>
+      <button id="authSubmit" class="w-full bg-[#1d9bf0] hover:bg-[#1a8cd8] text-white font-bold py-2.5 rounded-full">Войти</button>
+    </div>
+  </div>
 
   <!-- search / filter -->
   <div class="border-b hairline px-4 py-2 flex items-center gap-2">
@@ -69,29 +99,101 @@
 
 <script>
 const $ = (s, el=document) => el.querySelector(s);
-let NICK = localStorage.getItem("nick") || "";
-
-function ensureNick() {
-  if (!NICK) {
-    NICK = (prompt("Придумай никнейм:", "guest" + Math.floor(Math.random()*1000)) || "anon").trim().slice(0,30) || "anon";
-    localStorage.setItem("nick", NICK);
-  }
-  $("#nickBtn").textContent = "@" + NICK;
-  $("#meAvatar").textContent = NICK.slice(0,1).toUpperCase();
-}
-$("#nickBtn").onclick = () => {
-  const n = (prompt("Сменить никнейм:", NICK) || "").trim().slice(0,30);
-  if (n) { NICK = n; localStorage.setItem("nick", n); ensureNick(); load(); }
-};
+let ME = null; // {id, name, login} or null
 
 async function api(method, path, body) {
   const r = await fetch(path, {
     method,
-    headers: { "Content-Type": "application/json", "X-Nick": NICK },
+    credentials: "same-origin", // send the session cookie
+    headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.status);
+  if (!r.ok) {
+    const data = await r.json().catch(()=>({}));
+    const e = new Error(data.error || r.status);
+    e.status = r.status; e.code = data.code;
+    throw e;
+  }
   return r.status === 204 ? null : r.json();
+}
+
+// --- Auth UI ---
+let authMode = "login";
+function openAuth(mode){ switchAuth(mode||"login"); $("#authModal").classList.remove("hidden"); $("#aLogin").focus(); }
+function closeAuth(){ $("#authModal").classList.add("hidden"); $("#authError").classList.add("hidden"); $("#aPass").value=""; }
+function switchAuth(mode){
+  authMode = mode;
+  const reg = mode === "register";
+  $("#nameField").classList.toggle("hidden", !reg);
+  $("#tabLogin").classList.toggle("border-[#1d9bf0]", !reg);
+  $("#tabLogin").classList.toggle("text-[#71767b]", reg);
+  $("#tabRegister").classList.toggle("border-[#1d9bf0]", reg);
+  $("#tabRegister").classList.toggle("text-[#71767b]", !reg);
+  $("#tabLogin").classList.toggle("border-transparent", reg);
+  $("#tabRegister").classList.toggle("border-transparent", !reg);
+  $("#authSubmit").textContent = reg ? "Зарегистрироваться" : "Войти";
+  $("#authError").classList.add("hidden");
+}
+function authErr(msg){ const e=$("#authError"); e.textContent=msg; e.classList.remove("hidden"); }
+
+$("#authSubmit").onclick = async () => {
+  const login = $("#aLogin").value.trim();
+  const password = $("#aPass").value;
+  const name = $("#aName").value.trim();
+  if (!login || !password) { authErr("Заполни логин и пароль"); return; }
+  try {
+    if (authMode === "register") {
+      ME = await api("POST", "/api/register", {name, login, password});
+    } else {
+      ME = await api("POST", "/api/login", {login, password});
+    }
+    closeAuth();
+    renderAuth();
+    await load();
+  } catch(e) {
+    // Login already taken on register -> offer to log in instead.
+    if (e.code === "login_taken") {
+      authErr("Логин уже занят. Похоже, у тебя есть аккаунт — переключаю на вход.");
+      switchAuth("login");
+      $("#aLogin").value = login;
+      return;
+    }
+    authErr(e.message);
+  }
+};
+// Enter submits the auth form.
+["aLogin","aPass","aName"].forEach(id => {
+  $("#"+id).addEventListener("keydown", e => { if (e.key === "Enter") $("#authSubmit").click(); });
+});
+
+function renderAuth(){
+  const box = $("#authBox");
+  if (ME) {
+    box.innerHTML = `
+      <span class="text-right leading-tight">
+        <span class="font-bold block">${esc(ME.name)}</span>
+        <span class="text-[#71767b] text-xs">@${esc(ME.login)}</span>
+      </span>
+      <div class="w-9 h-9 rounded-full flex items-center justify-center font-bold"
+           style="background:${avatarColor(ME.login)}">${esc(ME.login.slice(0,1).toUpperCase())}</div>
+      <button id="logoutBtn" class="text-[#71767b] hover:text-[#f4212e] ml-1">Выйти</button>`;
+    $("#logoutBtn").onclick = async () => { await api("POST","/api/logout"); ME=null; renderAuth(); await load(); };
+    $("#composerSection").classList.remove("hidden");
+    $("#signinPrompt").classList.add("hidden");
+    $("#meAvatar").style.background = avatarColor(ME.login);
+    $("#meAvatar").textContent = ME.login.slice(0,1).toUpperCase();
+  } else {
+    box.innerHTML = `<button onclick="openAuth('login')" class="bg-[#1d9bf0] hover:bg-[#1a8cd8] text-white font-bold px-4 py-1.5 rounded-full">Войти</button>`;
+    $("#composerSection").classList.add("hidden");
+    $("#signinPrompt").classList.remove("hidden");
+  }
+}
+
+// Require login for an action; opens the modal and returns false if not logged in.
+function requireAuth(){
+  if (ME) return true;
+  openAuth("login");
+  return false;
 }
 
 function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -235,6 +337,7 @@ $("#composer").addEventListener("input", e => {
   $("#counter").textContent = 280 - e.target.value.length;
 });
 $("#postBtn").onclick = async () => {
+  if (!requireAuth()) return;
   const content = $("#composer").value.trim();
   if (!content) return;
   $("#postBtn").disabled = true;
@@ -258,6 +361,7 @@ $("#feed").addEventListener("click", async (e) => {
   const act = btn.dataset.act;
 
   if (act === "like") {
+    if (!requireAuth()) return;
     try {
       const r = await api("POST", `/api/posts/${id}/like`);
       // Keep local state in sync so the Избранное tab stays correct.
@@ -308,6 +412,7 @@ $("#feed").addEventListener("click", async (e) => {
   }
 
   if (act === "send-comment") {
+    if (!requireAuth()) return;
     const box = $('[data-role=comments]', art);
     const inp = $('[data-role=cinput]', box);
     const t = inp.value.trim();
@@ -335,6 +440,11 @@ function renderComments(cs){
     </div>`).join("");
 }
 function commentForm(){
+  if (!ME) {
+    return `<div class="pt-1 text-sm text-[#71767b]">
+      <a href="#" onclick="openAuth('login');return false" class="text-[#1d9bf0] hover:underline">Войди</a>, чтобы ответить.
+    </div>`;
+  }
   return `<div class="flex gap-2 pt-1">
     <input data-role="cinput" maxlength="280" placeholder="Ответить…"
       class="flex-1 bg-transparent border hairline rounded-full px-3 py-1 text-sm outline-none">
@@ -342,8 +452,12 @@ function commentForm(){
   </div>`;
 }
 
-ensureNick();
-load();
+// --- Init ---
+(async function init(){
+  try { ME = await api("GET", "/api/me"); } catch(_) { ME = null; }
+  renderAuth();
+  await load();
+})();
 </script>
 </body>
 </html>

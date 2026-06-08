@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,6 +33,18 @@ CREATE TABLE IF NOT EXISTS comments (
 	post_id    BIGINT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
 	author     TEXT NOT NULL,
 	content    TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS users (
+	id         BIGSERIAL PRIMARY KEY,
+	name       TEXT NOT NULL,
+	login      TEXT NOT NULL UNIQUE,
+	pass_hash  TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS sessions (
+	token      TEXT PRIMARY KEY,
+	user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 `
@@ -157,4 +170,58 @@ func (s *PostgresStore) AddComment(ctx context.Context, postID int64, author, co
 		`INSERT INTO comments(post_id, author, content) VALUES($1,$2,$3) RETURNING id, created_at`,
 		postID, author, content).Scan(&c.ID, &c.CreatedAt)
 	return c, err
+}
+
+func (s *PostgresStore) CreateUser(ctx context.Context, name, login, passHash string) (*User, error) {
+	var u User
+	u.Name, u.Login, u.PassHash = name, login, passHash
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO users(name, login, pass_hash) VALUES($1,$2,$3) RETURNING id, created_at`,
+		name, login, passHash).Scan(&u.ID, &u.CreatedAt)
+	if err != nil {
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" {
+			return nil, errLoginTaken
+		}
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *PostgresStore) GetUserByLogin(ctx context.Context, login string) (*User, bool, error) {
+	var u User
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, login, pass_hash, created_at FROM users WHERE login=$1`, login).
+		Scan(&u.ID, &u.Name, &u.Login, &u.PassHash, &u.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &u, true, nil
+}
+
+func (s *PostgresStore) CreateSession(ctx context.Context, token string, userID int64) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO sessions(token, user_id) VALUES($1,$2)`, token, userID)
+	return err
+}
+
+func (s *PostgresStore) GetUserBySession(ctx context.Context, token string) (*User, error) {
+	var u User
+	err := s.pool.QueryRow(ctx,
+		`SELECT u.id, u.name, u.login, u.pass_hash, u.created_at
+		 FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token=$1`, token).
+		Scan(&u.ID, &u.Name, &u.Login, &u.PassHash, &u.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *PostgresStore) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE token=$1`, token)
+	return err
 }

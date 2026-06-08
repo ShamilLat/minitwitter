@@ -13,9 +13,12 @@ type MemStore struct {
 	mu       sync.Mutex
 	seq      int64
 	cseq     int64
+	useq     int64
 	posts    map[int64]*Post
 	likes    map[int64]map[string]bool // postID -> set of nicks
 	comments map[int64][]Comment
+	users    map[string]*User // login -> user
+	sessions map[string]int64 // token -> userID
 }
 
 func NewMemStore() *MemStore {
@@ -23,6 +26,8 @@ func NewMemStore() *MemStore {
 		posts:    map[int64]*Post{},
 		likes:    map[int64]map[string]bool{},
 		comments: map[int64][]Comment{},
+		users:    map[string]*User{},
+		sessions: map[string]int64{},
 	}
 	// Seed a couple of posts so the feed isn't empty.
 	m.CreatePost(context.Background(), "jack", "just setting up my minitwttr")
@@ -127,4 +132,57 @@ func (m *MemStore) AddComment(_ context.Context, postID int64, author, content s
 	c := Comment{ID: m.cseq, PostID: postID, Author: author, Content: content, CreatedAt: time.Now().UTC()}
 	m.comments[postID] = append(m.comments[postID], c)
 	return c, nil
+}
+
+func (m *MemStore) CreateUser(_ context.Context, name, login, passHash string) (*User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.users[login]; exists {
+		return nil, errLoginTaken
+	}
+	m.useq++
+	u := &User{ID: m.useq, Name: name, Login: login, PassHash: passHash, CreatedAt: time.Now().UTC()}
+	m.users[login] = u
+	return u, nil
+}
+
+func (m *MemStore) GetUserByLogin(_ context.Context, login string) (*User, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[login]
+	if !ok {
+		return nil, false, nil
+	}
+	cp := *u
+	return &cp, true, nil
+}
+
+func (m *MemStore) CreateSession(_ context.Context, token string, userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[token] = userID
+	return nil
+}
+
+func (m *MemStore) GetUserBySession(_ context.Context, token string) (*User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	uid, ok := m.sessions[token]
+	if !ok {
+		return nil, nil
+	}
+	for _, u := range m.users {
+		if u.ID == uid {
+			cp := *u
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *MemStore) DeleteSession(_ context.Context, token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, token)
+	return nil
 }

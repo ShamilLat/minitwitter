@@ -41,6 +41,15 @@
     </div>
   </section>
 
+  <!-- search / filter -->
+  <div class="border-b hairline px-4 py-2 flex items-center gap-2">
+    <span class="text-[#71767b]">🔍</span>
+    <input id="search" placeholder="Поиск по текст, #тегам, @авторам"
+      class="flex-1 bg-transparent outline-none text-sm py-1">
+    <button id="clearFilter" class="hidden text-xs text-[#1d9bf0] hover:underline">сбросить</button>
+  </div>
+  <div id="filterChip" class="hidden border-b hairline px-4 py-2 text-sm text-[#71767b]"></div>
+
   <!-- feed -->
   <main id="feed"></main>
   <div id="loading" class="p-8 text-center text-[#71767b]">Загрузка…</div>
@@ -74,6 +83,14 @@ async function api(method, path, body) {
 }
 
 function esc(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// Turn escaped text into HTML with clickable #hashtags and @mentions.
+function linkify(text){
+  return esc(text)
+    .replace(/(^|\s)#([\p{L}\d_]+)/gu, (m,sp,tag) =>
+      `${sp}<a href="#" class="text-[#1d9bf0] hover:underline" data-tag="${tag}">#${tag}</a>`)
+    .replace(/(^|\s)@([\p{L}\d_]+)/gu, (m,sp,name) =>
+      `${sp}<a href="#" class="text-[#1d9bf0] hover:underline" data-mention="${name}">@${name}</a>`);
+}
 function avatarColor(name){ let h=0; for(const c of name) h=(h*31+c.charCodeAt(0))%360; return `hsl(${h},60%,45%)`; }
 function timeAgo(iso){
   const s = Math.floor((Date.now() - new Date(iso))/1000);
@@ -93,7 +110,7 @@ function postHTML(p) {
          style="background:${avatarColor(p.author)}">${esc(p.author.slice(0,1).toUpperCase())}</div>
     <div class="flex-1 min-w-0">
       <div class="flex items-center gap-1 text-[15px]">
-        <span class="font-bold">@${esc(p.author)}</span>
+        <a href="#" class="font-bold hover:underline" data-mention="${esc(p.author)}">@${esc(p.author)}</a>
         <span class="text-[#71767b]">· ${timeAgo(p.created_at)}</span>
         ${p.edited_at ? '<span class="text-[#71767b] text-xs">(ред.)</span>' : ''}
         ${mine ? `<span class="ml-auto flex gap-3 text-[#71767b]">
@@ -101,7 +118,7 @@ function postHTML(p) {
             <button class="hover:text-[#f4212e]" data-act="del">🗑️</button>
           </span>` : ''}
       </div>
-      <p class="whitespace-pre-wrap break-words mt-0.5" data-role="content">${esc(p.content)}</p>
+      <p class="whitespace-pre-wrap break-words mt-0.5" data-role="content">${linkify(p.content)}</p>
       <div class="flex gap-10 mt-3 text-[#71767b] text-sm">
         <button class="flex items-center gap-1 hover:text-[#1d9bf0]" data-act="toggle-comments">
           💬 <span data-role="ccount">${p.comments}</span>
@@ -116,14 +133,67 @@ function postHTML(p) {
 }
 
 let POSTS = [];
+let FILTER = { type: null, value: null }; // type: 'tag' | 'mention' | 'text'
+
+function matchesFilter(p){
+  if (!FILTER.type) return true;
+  const c = p.content.toLowerCase();
+  if (FILTER.type === "tag")     return new RegExp(`(^|\\s)#${FILTER.value}\\b`,"iu").test(p.content);
+  if (FILTER.type === "mention") return p.author.toLowerCase() === FILTER.value.toLowerCase()
+                                     || new RegExp(`(^|\\s)@${FILTER.value}\\b`,"iu").test(p.content);
+  if (FILTER.type === "text")    return c.includes(FILTER.value) || p.author.toLowerCase().includes(FILTER.value);
+  return true;
+}
+
+function renderFeed(){
+  const shown = POSTS.filter(matchesFilter);
+  $("#feed").innerHTML = shown.length
+    ? shown.map(postHTML).join("")
+    : `<div class="p-8 text-center text-[#71767b]">Ничего не найдено</div>`;
+
+  const chip = $("#filterChip");
+  if (FILTER.type) {
+    const label = FILTER.type === "tag" ? "#"+FILTER.value
+                : FILTER.type === "mention" ? "@"+FILTER.value
+                : `«${FILTER.value}»`;
+    chip.textContent = `Фильтр: ${label} · ${shown.length} постов`;
+    chip.classList.remove("hidden");
+    $("#clearFilter").classList.remove("hidden");
+  } else {
+    chip.classList.add("hidden");
+    $("#clearFilter").classList.add("hidden");
+  }
+}
+
+function setFilter(type, value){
+  FILTER = { type, value };
+  if (type === "text") $("#search").value = value; else $("#search").value = "";
+  renderFeed();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+function clearFilter(){ FILTER = {type:null,value:null}; $("#search").value=""; renderFeed(); }
+
 async function load() {
-  $("#loading").style.display = "block";
   try {
     POSTS = await api("GET", "/api/posts");
-    $("#feed").innerHTML = POSTS.map(postHTML).join("");
+    renderFeed();
   } catch(e){ $("#feed").innerHTML = `<div class="p-6 text-center text-[#f4212e]">Ошибка: ${esc(String(e.message))}</div>`; }
   $("#loading").style.display = "none";
 }
+
+// Search box -> text filter.
+$("#search").addEventListener("input", e => {
+  const v = e.target.value.trim().toLowerCase();
+  FILTER = v ? {type:"text", value:v} : {type:null,value:null};
+  renderFeed();
+});
+$("#clearFilter").onclick = clearFilter;
+
+// Auto-refresh the feed every 15s, but don't blow away an open filter/compose.
+setInterval(async () => {
+  if (document.hidden) return;
+  try { POSTS = await api("GET", "/api/posts"); renderFeed(); } catch(_){}
+}, 15000);
 
 // composer
 $("#composer").addEventListener("input", e => {
@@ -140,6 +210,12 @@ $("#postBtn").onclick = async () => {
 
 // event delegation for feed actions
 $("#feed").addEventListener("click", async (e) => {
+  // Clickable hashtags / mentions.
+  const tag = e.target.closest("[data-tag]");
+  if (tag) { e.preventDefault(); setFilter("tag", tag.dataset.tag); return; }
+  const men = e.target.closest("[data-mention]");
+  if (men) { e.preventDefault(); setFilter("mention", men.dataset.mention); return; }
+
   const btn = e.target.closest("[data-act]");
   if (!btn) return;
   const art = e.target.closest("article");

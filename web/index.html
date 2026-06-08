@@ -24,6 +24,18 @@
     </div>
   </header>
 
+  <!-- tabs -->
+  <nav class="flex border-b hairline text-[15px] font-semibold">
+    <button data-tab="home" class="flex-1 py-3.5 hover:bg-white/5 relative">
+      Главная
+      <span class="tab-underline absolute bottom-0 left-1/2 -translate-x-1/2 h-1 w-14 rounded-full bg-[#1d9bf0]"></span>
+    </button>
+    <button data-tab="liked" class="flex-1 py-3.5 hover:bg-white/5 relative text-[#71767b]">
+      Избранное ❤️
+      <span class="tab-underline absolute bottom-0 left-1/2 -translate-x-1/2 h-1 w-14 rounded-full bg-[#1d9bf0] hidden"></span>
+    </button>
+  </nav>
+
   <!-- composer -->
   <section class="border-b hairline p-4 flex gap-3">
     <div id="meAvatar" class="w-10 h-10 rounded-full bg-[#1d9bf0] flex items-center justify-center font-bold shrink-0"></div>
@@ -134,8 +146,10 @@ function postHTML(p) {
 
 let POSTS = [];
 let FILTER = { type: null, value: null }; // type: 'tag' | 'mention' | 'text'
+let TAB = "home"; // 'home' | 'liked'
 
 function matchesFilter(p){
+  if (TAB === "liked" && !p.liked) return false;
   if (!FILTER.type) return true;
   const c = p.content.toLowerCase();
   if (FILTER.type === "tag")     return new RegExp(`(^|\\s)#${FILTER.value}\\b`,"iu").test(p.content);
@@ -147,9 +161,12 @@ function matchesFilter(p){
 
 function renderFeed(){
   const shown = POSTS.filter(matchesFilter);
+  const empty = TAB === "liked"
+    ? "Ты ещё ничего не лайкнул ❤️"
+    : "Ничего не найдено";
   $("#feed").innerHTML = shown.length
     ? shown.map(postHTML).join("")
-    : `<div class="p-8 text-center text-[#71767b]">Ничего не найдено</div>`;
+    : `<div class="p-8 text-center text-[#71767b]">${empty}</div>`;
 
   const chip = $("#filterChip");
   if (FILTER.type) {
@@ -189,9 +206,27 @@ $("#search").addEventListener("input", e => {
 });
 $("#clearFilter").onclick = clearFilter;
 
+// Tabs: home / liked.
+document.querySelectorAll("nav [data-tab]").forEach(btn => {
+  btn.onclick = () => {
+    TAB = btn.dataset.tab;
+    document.querySelectorAll("nav [data-tab]").forEach(b => {
+      const active = b === btn;
+      b.classList.toggle("text-[#71767b]", !active);
+      b.querySelector(".tab-underline").classList.toggle("hidden", !active);
+    });
+    renderFeed();
+    window.scrollTo({top:0});
+  };
+});
+
 // Auto-refresh the feed every 15s, but don't blow away an open filter/compose.
 setInterval(async () => {
   if (document.hidden) return;
+  // Don't wipe the feed while the user has comments open or is typing a reply.
+  if ($('[data-role=comments]:not(.hidden)')) return;
+  if (document.activeElement && document.activeElement.tagName === "TEXTAREA"
+      && document.activeElement.value) return;
   try { POSTS = await api("GET", "/api/posts"); renderFeed(); } catch(_){}
 }, 15000);
 
@@ -225,15 +260,26 @@ $("#feed").addEventListener("click", async (e) => {
   if (act === "like") {
     try {
       const r = await api("POST", `/api/posts/${id}/like`);
-      $('[data-role=lcount]', art).textContent = r.likes;
-      btn.classList.toggle("text-[#f91880]", r.liked);
-      btn.querySelector("svg").outerHTML = heart(r.liked);
+      // Keep local state in sync so the Избранное tab stays correct.
+      const p = POSTS.find(p => String(p.id) === id);
+      if (p) { p.liked = r.liked; p.likes = r.likes; }
+      if (TAB === "liked" && !r.liked) {
+        renderFeed(); // unliked post leaves the favourites view
+      } else {
+        $('[data-role=lcount]', art).textContent = r.likes;
+        btn.classList.toggle("text-[#f91880]", r.liked);
+        btn.querySelector("svg").outerHTML = heart(r.liked);
+      }
     } catch(err){ alert(err.message); }
   }
 
   if (act === "del") {
     if (!confirm("Удалить пост?")) return;
-    try { await api("DELETE", `/api/posts/${id}`); art.remove(); } catch(err){ alert(err.message); }
+    try {
+      await api("DELETE", `/api/posts/${id}`);
+      POSTS = POSTS.filter(p => String(p.id) !== id);
+      art.remove();
+    } catch(err){ alert(err.message); }
   }
 
   if (act === "edit") {
@@ -243,8 +289,10 @@ $("#feed").addEventListener("click", async (e) => {
     const t = next.trim();
     if (!t) return;
     try {
-      const p = await api("PUT", `/api/posts/${id}`, {content: t});
-      $('[data-role=content]', art).textContent = p.content;
+      const updated = await api("PUT", `/api/posts/${id}`, {content: t});
+      const p = POSTS.find(p => String(p.id) === id);
+      if (p) p.content = updated.content;
+      $('[data-role=content]', art).innerHTML = linkify(updated.content);
     } catch(err){ alert(err.message); }
   }
 
@@ -266,14 +314,16 @@ $("#feed").addEventListener("click", async (e) => {
     if (!t) return;
     try {
       await api("POST", `/api/posts/${id}/comments`, {content: t});
-      const cs = await api("GET", `/api/posts/${id}/comments`);
+      const cs = (await api("GET", `/api/posts/${id}/comments`)) || [];
       box.innerHTML = renderComments(cs) + commentForm();
       $('[data-role=ccount]', art).textContent = cs.length;
+      $('[data-role=cinput]', box).focus();
     } catch(err){ alert(err.message); }
   }
 });
 
 function renderComments(cs){
+  cs = cs || [];
   if (!cs.length) return `<div class="text-[#71767b] text-sm">Пока нет комментариев</div>`;
   return cs.map(c => `
     <div class="flex gap-2">

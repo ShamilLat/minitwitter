@@ -1,0 +1,7 @@
+onehourtwitter.ru {
+	reverse_proxy app:8080
+}
+
+www.onehourtwitter.ru {
+	redir https://onehourtwitter.ru{uri} permanent
+}

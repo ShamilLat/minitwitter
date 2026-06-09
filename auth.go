@@ -49,12 +49,20 @@ func mustUser(w http.ResponseWriter, r *http.Request) (*User, bool) {
 	return u, true
 }
 
-func setSessionCookie(w http.ResponseWriter, token string) {
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   30 * 24 * 3600,
 	})
@@ -127,7 +135,7 @@ func startSession(w http.ResponseWriter, r *http.Request, u *User) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	setSessionCookie(w, token)
+	setSessionCookie(w, r, token)
 	writeJSON(w, 200, u)
 }
 
@@ -136,7 +144,13 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		store.DeleteSession(r.Context(), c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		Path:     "/",
+		Secure:   requestIsHTTPS(r),
+		MaxAge:   -1,
+	})
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 

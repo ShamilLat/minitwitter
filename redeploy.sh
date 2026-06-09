@@ -8,4 +8,4 @@ ssh -o BatchMode=yes sam@81.26.177.214 '
   sudo git pull &&
   sudo docker compose up -d --build
 '
-echo "Deployed. Open http://81.26.177.214"
+echo "Deployed. Open https://onehourtwitter.ru"

@@ -19,12 +19,27 @@ services:
     environment:
       DATABASE_URL: postgres://twitter:twitter@db:5432/twitter?sslmode=disable
       PORT: "8080"
-    ports:
-      - "80:8080"
+    expose:
+      - "8080"
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
